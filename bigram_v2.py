@@ -105,9 +105,12 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_head, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_head)])
+        self.proj = nn.Linear(num_head * head_size, n_embd)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
 
 
 # --------------------
@@ -117,27 +120,36 @@ class FeedForward(nn.Module):
 
     def __init__(self, n_embd):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(n_embd, n_embd), nn.ReLU())
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+        )
 
     def forward(self, x):
+        # ffwd is applied per token
+        # Same weights, no token mixing
         return self.net(x)
+
 
 # --------------------
 # Block
 class Block(nn.Module):
-    """ transformer block: communication followed by computation """
+    """transformer block: communication followed by computation"""
+
     def __init__(self, n_embd, n_head):
         super().__init__()
-        # n_embd: embedding dimension 
-        # n_head: the number of heads 
+        # n_embd: embedding dimension
+        # n_head: the number of heads
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embd)
-    
+
     def forward(self, x):
-        x = self.sa(x)
-        x = self.ffwd(x)
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
         return x
+
 
 # --------------------
 # Bigram + Self-Attention Model
@@ -147,13 +159,11 @@ class BigramLanguageModel(nn.Module):
         super().__init__()
         self.token_embdding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embdding_table = nn.Embedding(block_size, n_embd)
-        # self.sa_head = Head(
-        #     n_embd
-        # )  # passing n_embd head size so taking B, T, C = x.shape in Head forward makes sense
-        self.sa_heads = MultiHeadAttention(
-            4, n_embd // 4
-        )  # i.e. 4 heads of 8-dimentional self-attention
-        self.ffwd = FeedForward(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -163,10 +173,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embdding_table(torch.arange(T, device=device))  # (T, C)
 
         x = tok_emb + pos_emb  # (B, T, C)
-        x = self.sa_heads(x)  # (B, T, C)
-        # ffwd is applied per token
-        # Same weights, no token mixing
-        x = self.ffwd(x)  # (B, T, C)
+        x = self.blocks(x)  # (B, T, C)
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         loss = None
